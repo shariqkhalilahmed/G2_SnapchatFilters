@@ -41,7 +41,7 @@ To use this project, follow these steps:
 	- In Target Setup, ensure correct Hardware Platform
 	- In STDIO Connection, ensure Port is highest COM port and BAUD rate is 115200
 
-12. Press Run (note overall C code provided in github is incomplete and so faulty but usage of IPs in C code is correct)
+12. Press Run (Note: overall C code provided in github is incomplete and therefore faulty but usage of IPs in C code is correct)
 
 13. See menu in Terminal (Press '9' for project to work)
 
@@ -64,9 +64,9 @@ Respository Structure
 
 Authors
 -------
-Shariq Khalil Ahmed
-Kazi Sudipto Arif
-Shirley Yang
+- Shariq Khalil Ahmed
+- Kazi Sudipto Arif
+- Shirley Yang
 
 Acknowledgements
 ----------------
