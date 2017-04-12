@@ -1,0 +1,986 @@
+/************************************************************************/
+/*																		*/
+/*	video_demo.c	--	ZYBO Video demonstration 						*/
+/*																		*/
+/************************************************************************/
+/*	Author: Sam Bobrowicz												*/
+/*	Copyright 2015, Digilent Inc.										*/
+/************************************************************************/
+/*  Module Description: 												*/
+/*																		*/
+/*		This file contains code for running a demonstration of the		*/
+/*		Video input and output capabilities on the ZYBO. It is a good	*/
+/*		example of how to properly use the display_ctrl and				*/
+/*		video_capture drivers.											*/
+/*																		*/
+/*																		*/
+/************************************************************************/
+/*  Revision History:													*/
+/* 																		*/
+/*		11/25/2015(SamB): Created										*/
+/*																		*/
+/************************************************************************/
+
+/* ------------------------------------------------------------ */
+/*				Include File Definitions						*/
+/* ------------------------------------------------------------ */
+
+#include "video_demo.h"
+#include "video_capture/video_capture.h"
+#include "display_ctrl/display_ctrl.h"
+#include "intc/intc.h"
+#include <stdio.h>
+#include "xuartlite_l.h"
+//#include "xuartps.h"
+#include "math.h"
+#include <ctype.h>
+#include <stdlib.h>
+#include "xil_types.h"
+#include "xil_cache.h"
+#include "xparameters.h"
+#include "block_detector.h"
+#include "draw.h"
+
+/*
+ * XPAR redefines
+ */
+#define DYNCLK_BASEADDR XPAR_AXI_DYNCLK_0_BASEADDR
+#define VGA_VDMA_ID XPAR_AXIVDMA_0_DEVICE_ID
+#define DISP_VTC_ID XPAR_VTC_0_DEVICE_ID
+#define VID_VTC_ID XPAR_VTC_1_DEVICE_ID
+#define VID_GPIO_ID XPAR_AXI_GPIO_VIDEO_DEVICE_ID
+#define VID_VTC_IRPT_ID XPAR_INTC_0_VTC_1_VEC_ID
+#define VID_GPIO_IRPT_ID XPAR_INTC_0_GPIO_0_VEC_ID
+#define SCU_TIMER_ID XPAR_AXI_TIMER_0_DEVICE_ID
+#define UART_BASEADDR XPAR_UARTLITE_0_BASEADDR
+#define BLOCK_DETECTOR XPAR_BLOCK_DETECTOR_0_S00_AXI_BASEADDR
+#define BLOCK_DETECTOR2 XPAR_BLOCK_DETECTOR_1_S00_AXI_BASEADDR
+#define BLOCK_DETECTOR3 XPAR_BLOCK_DETECTOR_2_S00_AXI_BASEADDR
+#define BLOCK_DETECTOR4 XPAR_BLOCK_DETECTOR_3_S00_AXI_BASEADDR
+#define DRAW XPAR_DRAW_0_S00_AXI_BASEADDR
+#define BT_BASEADDR 0x40610000
+
+
+/* ------------------------------------------------------------ */
+/*				Global Variables								*/
+/* ------------------------------------------------------------ */
+
+/*
+ * Display and Video Driver structs
+ */
+DisplayCtrl dispCtrl;
+XAxiVdma vdma;
+VideoCapture videoCapt;
+INTC intc;
+char fRefresh; //flag used to trigger a refresh of the Menu on video detect
+
+
+/*
+ * Framebuffers for video data
+ */
+u8 frameBuf[DISPLAY_NUM_FRAMES][DEMO_MAX_FRAME];
+u8 *pFrames[DISPLAY_NUM_FRAMES]; //array of pointers to the frame buffers
+
+/*
+ * Interrupt vector table
+ */
+const ivt_t ivt[] = {
+	videoGpioIvt(VID_GPIO_IRPT_ID, &videoCapt),
+	videoVtcIvt(VID_VTC_IRPT_ID, &(videoCapt.vtc))
+};
+
+/* ------------------------------------------------------------ */
+/*				Procedure Definitions							*/
+/* ------------------------------------------------------------ */
+
+int main(void)
+{
+	Xil_ICacheEnable();
+	Xil_DCacheEnable();
+	DemoInitialize();
+
+	DemoRun();
+
+	return 0;
+}
+
+
+void DemoInitialize()
+{
+	int Status;
+	XAxiVdma_Config *vdmaConfig;
+	int i;
+
+	/*
+	 * Initialize an array of pointers to the 3 frame buffers
+	 */
+	for (i = 0; i < DISPLAY_NUM_FRAMES; i++)
+	{
+		pFrames[i] = frameBuf[i];
+	}
+
+	/*
+	 * Initialize VDMA driver
+	 */
+	vdmaConfig = XAxiVdma_LookupConfig(VGA_VDMA_ID);
+	if (!vdmaConfig)
+	{
+		xil_printf("No video DMA found for ID %d\r\n", VGA_VDMA_ID);
+		return;
+	}
+	Status = XAxiVdma_CfgInitialize(&vdma, vdmaConfig, vdmaConfig->BaseAddress);
+	if (Status != XST_SUCCESS)
+	{
+		xil_printf("VDMA Configuration Initialization failed %d\r\n", Status);
+		return;
+	}
+
+	/*
+	 * Initialize the Display controller and start it
+	 */
+	Status = DisplayInitialize(&dispCtrl, &vdma, DISP_VTC_ID, DYNCLK_BASEADDR, pFrames, DEMO_STRIDE);
+	if (Status != XST_SUCCESS)
+	{
+		xil_printf("Display Ctrl initialization failed during demo initialization%d\r\n", Status);
+		return;
+	}
+	Status = DisplayStart(&dispCtrl);
+	if (Status != XST_SUCCESS)
+	{
+		xil_printf("Couldn't start display during demo initialization%d\r\n", Status);
+		return;
+	}
+
+	/*
+	 * Initialize the Interrupt controller and start it.
+	 */
+	Status = fnInitInterruptController(&intc);
+	if(Status != XST_SUCCESS) {
+		xil_printf("Error initializing interrupts");
+		return;
+	}
+	fnEnableInterrupts(&intc, &ivt[0], sizeof(ivt)/sizeof(ivt[0]));
+
+	/*
+	 * Initialize the Video Capture device
+	 */
+	Status = VideoInitialize(&videoCapt, &intc, &vdma, VID_GPIO_ID, VID_VTC_ID, VID_VTC_IRPT_ID, pFrames, DEMO_STRIDE, DEMO_START_ON_DET);
+	if (Status != XST_SUCCESS)
+	{
+		xil_printf("Video Ctrl initialization failed during demo initialization%d\r\n", Status);
+		return;
+	}
+
+	/*
+	 * Set the Video Detect callback to trigger the menu to reset, displaying the new detected resolution
+	 */
+	VideoSetCallback(&videoCapt, DemoISR, &fRefresh);
+
+	DemoPrintTest(dispCtrl.framePtr[dispCtrl.curFrame], dispCtrl.vMode.width, dispCtrl.vMode.height, dispCtrl.stride, DEMO_PATTERN_1);
+
+	return;
+}
+
+void DemoRun()
+{
+	int nextFrame = 0;
+	char userInput = 0;
+	u32 locked;
+	XGpio *GpioPtr = &videoCapt.gpio;
+	char user_byte = 0;
+	u8 draw_r = 0;
+	u8 draw_g = 0;
+	u8 draw_b = 0;
+
+	u32 r_min_1 = 0;
+	u32 r_max_1 = 50;
+	u32 g_min_1 = 90;
+	u32 g_max_1 = 150;
+	u32 b_min_1 = 180;
+	u32 b_max_1 = 255;
+
+	u32 r_min_2 = 100;
+	u32 r_max_2 = 255;
+	u32 g_min_2 = 0;
+	u32 g_max_2 = 50;
+	u32 b_min_2 = 0;
+	u32 b_max_2 = 50;
+
+	u32 r_min_3 = 0;
+	u32 r_max_3 = 50;
+	u32 g_min_3 = 0;
+	u32 g_max_3 = 50;
+	u32 b_min_3 = 100;
+	u32 b_max_3 = 255;
+
+	u32 r_min_4 = 100;
+	u32 r_max_4 = 255;
+	u32 g_min_4 = 100;
+	u32 g_max_4 = 255;
+	u32 b_min_4 = 0;
+	u32 b_max_4 = 50;
+
+
+	/* set color limits */
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR, 64, r_min_1);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR, 68, r_max_1);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR, 72, g_min_1);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR, 76, g_max_1);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR, 80, b_min_1);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR, 84, b_max_1);
+
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR2, 64, r_min_2);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR2, 68, r_max_2);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR2, 72, g_min_2);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR2, 76, g_max_2);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR2, 80, b_min_2);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR2, 84, b_max_2);
+
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR3, 64, r_min_3);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR3, 68, r_max_3);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR3, 72, g_min_3);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR3, 76, g_max_3);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR3, 80, b_min_3);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR3, 84, b_max_3);
+
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR4, 64, r_min_4);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR4, 68, r_max_4);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR4, 72, g_min_4);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR4, 76, g_max_4);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR4, 80, b_min_4);
+	BLOCK_DETECTOR_mWriteReg(BLOCK_DETECTOR4, 84, b_max_4);
+
+	DRAW_mWriteReg(DRAW, 0, 50);
+	DRAW_mWriteReg(DRAW, 4, 100);
+	DRAW_mWriteReg(DRAW, 8, 50);
+	DRAW_mWriteReg(DRAW, 12, 100);
+
+	/* set resolution of output display */
+	int disp_status;
+	disp_status = DisplayStop(&dispCtrl);
+	DisplaySetMode(&dispCtrl, &VMODE_1920x1080);
+	DisplayStart(&dispCtrl);
+	if (disp_status == XST_DMA_ERROR)
+	{
+		xil_printf("\n\rWARNING: AXI VDMA Error detected and cleared\n\r");
+	}
+
+	/* Flush UART FIFO */
+	while (!XUartLite_IsReceiveEmpty(UART_BASEADDR))
+	{
+		XUartLite_ReadReg(UART_BASEADDR, XUL_RX_FIFO_OFFSET);
+	}
+	while (userInput != 'q')
+	{
+		fRefresh = 0;
+		DemoPrintMenu();
+
+
+		/* Wait for data on UART */
+		while (XUartLite_IsReceiveEmpty(UART_BASEADDR) && !fRefresh)
+		{
+			/*
+			if(!XUartLite_IsReceiveEmpty(BT_BASEADDR)) {
+				user_byte = (u8)XUartLe_ReadReg(BT_BASEADDR, XUL_RX_FIFO_OFFSET);
+				xil_printf("%c", user_byte);
+			}
+			*/
+		}
+
+		/* Store the first character in the UART receive FIFO and echo it */
+		if (!XUartLite_IsReceiveEmpty(UART_BASEADDR))
+		{
+			userInput = XUartLite_ReadReg(UART_BASEADDR, XUL_RX_FIFO_OFFSET);
+			xil_printf("%c", userInput);
+		}
+		else  //Refresh triggered by video detect interrupt
+		{
+			userInput = 'r';
+		}
+
+		switch (userInput)
+		{
+		case '1':
+			DemoChangeRes();
+			break;
+		case '2':
+			nextFrame = dispCtrl.curFrame + 1;
+			if (nextFrame >= DISPLAY_NUM_FRAMES)
+			{
+				nextFrame = 0;
+			}
+			DisplayChangeFrame(&dispCtrl, nextFrame);
+			break;
+		case '3':
+			DemoPrintTest(pFrames[dispCtrl.curFrame], dispCtrl.vMode.width, dispCtrl.vMode.height, DEMO_STRIDE, DEMO_PATTERN_0);
+			break;
+		case '4':
+			DemoPrintTest(pFrames[dispCtrl.curFrame], dispCtrl.vMode.width, dispCtrl.vMode.height, DEMO_STRIDE, DEMO_PATTERN_1);
+			break;
+		case '5':
+			if (videoCapt.state == VIDEO_STREAMING)
+				VideoStop(&videoCapt);
+			else
+				VideoStart(&videoCapt);
+			break;
+		case '6':
+			nextFrame = videoCapt.curFrame + 1;
+			if (nextFrame >= DISPLAY_NUM_FRAMES)
+			{
+				nextFrame = 0;
+			}
+			VideoChangeFrame(&videoCapt, nextFrame);
+			break;
+		case '7':
+			nextFrame = videoCapt.curFrame + 1;
+			if (nextFrame >= DISPLAY_NUM_FRAMES)
+			{
+				nextFrame = 0;
+			}
+			VideoStop(&videoCapt);
+			DemoInvertFrame(pFrames[videoCapt.curFrame], pFrames[nextFrame], videoCapt.timing.HActiveVideo, videoCapt.timing.VActiveVideo, DEMO_STRIDE);
+			VideoStart(&videoCapt);
+			DisplayChangeFrame(&dispCtrl, nextFrame);
+			break;
+		case '8':
+			nextFrame = videoCapt.curFrame + 1;
+			if (nextFrame >= DISPLAY_NUM_FRAMES)
+			{
+				nextFrame = 0;
+			}
+			VideoStop(&videoCapt);
+			DemoScaleFrame(pFrames[videoCapt.curFrame], pFrames[nextFrame], videoCapt.timing.HActiveVideo, videoCapt.timing.VActiveVideo, dispCtrl.vMode.width, dispCtrl.vMode.height, DEMO_STRIDE);
+			VideoStart(&videoCapt);
+			DisplayChangeFrame(&dispCtrl, nextFrame);
+			break;
+		case '9':
+			while(1)
+			{
+				if(!XUartLite_IsReceiveEmpty(BT_BASEADDR)) {
+					user_byte = (u8)XUartLite_ReadReg(BT_BASEADDR, XUL_RX_FIFO_OFFSET);
+					if (user_byte == 'R') {
+						draw_r = 255;
+						draw_g = 0;
+						draw_b = 0;
+					}
+					else if (user_byte == 'B') {
+						draw_r = 0;
+						draw_b = 255;
+						draw_g = 0;
+					}
+					else if (user_byte == 'G') {
+						draw_r = 0;
+						draw_b = 0;
+						draw_g = 255;
+					}
+					else if (user_byte == 'W') {
+						draw_r = 255;
+						draw_b = 255;
+						draw_g = 255;
+					}
+				}
+
+
+				u32 x_min = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 20);
+				u32 x_max = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 24);
+				u32 y_min = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 28);
+				u32 y_max = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 32);
+				u32 pixel_in = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 36);
+				u32 ps = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 40);
+				u32 ns = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 44);
+				u32 r_min = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 64);
+				u32 r_max = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 68);
+				u32 g_min = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 72);
+				u32 g_max = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 76);
+				u32 b_min = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 80);
+				u32 b_max = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 84);
+				u32 r = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 48);
+				u32 g = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 52);
+				u32 b = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 56);
+				xil_printf("r: %05u, g: %05u, b: %05u", r, g, b);
+				xil_printf("x_min: %05u, x_max: %05u, y_min: %05u, y_max: %05u, ps: %06x, ns: %06x, r_min: %05u, r_max: %05u g_min: %05u, g_max: %05u, b_min: %05u, b_max: %05u\n", x_min, x_max, y_min, y_max, ps, ns, r_min, r_max, g_min, g_max, b_min, b_max);
+
+				DRAW_mWriteReg(DRAW, 16, r);
+				DRAW_mWriteReg(DRAW, 20, g);
+				DRAW_mWriteReg(DRAW, 24, b);
+/*
+				u32 x_min = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 20);
+				u32 x_max = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 24);
+				u32 y_min = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 28);
+				u32 y_max = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR, 32);
+
+				u32 x_min2 = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR2, 20);
+				u32 x_max2 = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR2, 24);
+				u32 y_min2 = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR2, 28);
+				u32 y_max2 = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR2, 32);
+
+				u32 x_min3 = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR3, 20);
+				u32 x_max3 = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR3, 24);
+				u32 y_min3 = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR3, 28);
+				u32 y_max3 = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR3, 32);
+
+				u32 x_min4 = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR4, 20);
+				u32 x_max4 = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR4, 24);
+				u32 y_min4 = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR4, 28);
+				u32 y_max4 = BLOCK_DETECTOR_mReadReg(BLOCK_DETECTOR4, 32);
+
+*/
+				u32 width = 1920;
+				u32 height = 1080;
+
+				u32 xcoi, ycoi;
+				// u32 lineStart = 0;
+
+				//u32 xcoord = (x_min + x_max)/2;
+				//u32 ycoord = (y_min + y_max)/2;
+
+				if (x_min < dispCtrl.vMode.width) {
+					for(ycoi = 0; ycoi < height; ycoi++)
+					{
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_min*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_min*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_min*3 +2] = draw_b; //Green
+					}
+				}
+
+				if (x_max < dispCtrl.vMode.width) {
+					for(ycoi = 0; ycoi < height; ycoi++)
+					{
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_max*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_max*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_max*3 +2] = draw_b; //Green
+					}
+				}
+
+
+				if (y_min < dispCtrl.vMode.height) {
+					for(xcoi = 0; xcoi < width; xcoi++)
+					{
+						pFrames[dispCtrl.curFrame][y_min*DEMO_STRIDE+xcoi*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][y_min*DEMO_STRIDE+xcoi*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][y_min*DEMO_STRIDE+xcoi*3 +2] = draw_b; //Green
+					}
+				}
+
+				if (y_max < dispCtrl.vMode.height) {
+					for(xcoi = 0; xcoi < width; xcoi++)
+					{
+						pFrames[dispCtrl.curFrame][y_max*DEMO_STRIDE+xcoi*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][y_max*DEMO_STRIDE+xcoi*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][y_max*DEMO_STRIDE+xcoi*3 +2] = draw_b; //Green
+					}
+				}
+
+/*
+				if (x_min2 < dispCtrl.vMode.width) {
+					for(ycoi = 0; ycoi < height; ycoi++)
+					{
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_min2*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_min2*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_min2*3 +2] = draw_b; //Green
+					}
+				}
+
+				if (x_max2 < dispCtrl.vMode.width) {
+					for(ycoi = 0; ycoi < height; ycoi++)
+					{
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_max2*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_max2*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_max2*3 +2] = draw_b; //Green
+					}
+				}
+
+
+				if (y_min2 < dispCtrl.vMode.height) {
+					for(xcoi = 0; xcoi < width; xcoi++)
+					{
+						pFrames[dispCtrl.curFrame][y_min2*DEMO_STRIDE+xcoi*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][y_min2*DEMO_STRIDE+xcoi*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][y_min2*DEMO_STRIDE+xcoi*3 +2] = draw_b; //Green
+					}
+				}
+
+				if (y_max2 < dispCtrl.vMode.height) {
+					for(xcoi = 0; xcoi < width; xcoi++)
+					{
+						pFrames[dispCtrl.curFrame][y_max2*DEMO_STRIDE+xcoi*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][y_max2*DEMO_STRIDE+xcoi*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][y_max2*DEMO_STRIDE+xcoi*3 +2] = draw_b; //Green
+					}
+				}
+
+				if (x_min3 < dispCtrl.vMode.width) {
+					for(ycoi = 0; ycoi < height; ycoi++)
+					{
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_min3*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_min3*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_min3*3 +2] = draw_b; //Green
+					}
+				}
+
+				if (x_max3 < dispCtrl.vMode.width) {
+					for(ycoi = 0; ycoi < height; ycoi++)
+					{
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_max3*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_max3*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_max3*3 +2] = draw_b; //Green
+					}
+				}
+
+
+				if (y_min3 < dispCtrl.vMode.height) {
+					for(xcoi = 0; xcoi < width; xcoi++)
+					{
+						pFrames[dispCtrl.curFrame][y_min3*DEMO_STRIDE+xcoi*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][y_min3*DEMO_STRIDE+xcoi*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][y_min3*DEMO_STRIDE+xcoi*3 +2] = draw_b; //Green
+					}
+				}
+
+				if (y_max3 < dispCtrl.vMode.height) {
+					for(xcoi = 0; xcoi < width; xcoi++)
+					{
+						pFrames[dispCtrl.curFrame][y_max3*DEMO_STRIDE+xcoi*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][y_max3*DEMO_STRIDE+xcoi*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][y_max3*DEMO_STRIDE+xcoi*3 +2] = draw_b; //Green
+					}
+				}
+
+
+				if (x_min4 < dispCtrl.vMode.width) {
+					for(ycoi = 0; ycoi < height; ycoi++)
+					{
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_min4*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_min4*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_min4*3 +2] = draw_b; //Green
+					}
+				}
+
+				if (x_max4 < dispCtrl.vMode.width) {
+					for(ycoi = 0; ycoi < height; ycoi++)
+					{
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_max4*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_max4*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][ycoi*DEMO_STRIDE+x_max4*3 +2] = draw_b; //Green
+					}
+				}
+
+
+				if (y_min4 < dispCtrl.vMode.height) {
+					for(xcoi = 0; xcoi < width; xcoi++)
+					{
+						pFrames[dispCtrl.curFrame][y_min4*DEMO_STRIDE+xcoi*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][y_min4*DEMO_STRIDE+xcoi*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][y_min4*DEMO_STRIDE+xcoi*3 +2] = draw_b; //Green
+					}
+				}
+
+				if (y_max4 < dispCtrl.vMode.height) {
+					for(xcoi = 0; xcoi < width; xcoi++)
+					{
+						pFrames[dispCtrl.curFrame][y_max4*DEMO_STRIDE+xcoi*3] = draw_r;         //Red
+						pFrames[dispCtrl.curFrame][y_max4*DEMO_STRIDE+xcoi*3+1] = draw_g; //Blue
+						pFrames[dispCtrl.curFrame][y_max4*DEMO_STRIDE+xcoi*3 +2] = draw_b; //Green
+					}
+				}*/
+
+
+				Xil_DCacheFlushRange((unsigned int) pFrames[dispCtrl.curFrame], DEMO_MAX_FRAME);
+
+			}
+			break;
+		case 'q':
+			break;
+		case 'r':
+			locked = XGpio_DiscreteRead(GpioPtr, 2);
+			xil_printf("%d", locked);
+			break;
+		default :
+			xil_printf("\n\rInvalid Selection");
+			MB_Sleep(50);
+		}
+	}
+
+	return;
+}
+
+void DemoPrintMenu()
+{
+	xil_printf("\x1B[H"); //Set cursor to top left of terminal
+	xil_printf("\x1B[2J"); //Clear terminal
+	xil_printf("**************************************************\n\r");
+	xil_printf("*                ZYBO Video Demo                 *\n\r");
+	xil_printf("**************************************************\n\r");
+	xil_printf("*Display Resolution: %28s*\n\r", dispCtrl.vMode.label);
+	printf("*Display Pixel Clock Freq. (MHz): %15.3f*\n\r", dispCtrl.pxlFreq);
+	xil_printf("*Display Frame Index: %27d*\n\r", dispCtrl.curFrame);
+	if (videoCapt.state == VIDEO_DISCONNECTED) xil_printf("*Video Capture Resolution: %22s*\n\r", "!HDMI UNPLUGGED!");
+	else xil_printf("*Video Capture Resolution: %17dx%-4d*\n\r", videoCapt.timing.HActiveVideo, videoCapt.timing.VActiveVideo);
+	xil_printf("*Video Frame Index: %29d*\n\r", videoCapt.curFrame);
+	xil_printf("**************************************************\n\r");
+	xil_printf("\n\r");
+	xil_printf("1 - Change Display Resolution\n\r");
+	xil_printf("2 - Change Display Framebuffer Index\n\r");
+	xil_printf("3 - Print Blended Test Pattern to Display Framebuffer\n\r");
+	xil_printf("4 - Print Color Bar Test Pattern to Display Framebuffer\n\r");
+	xil_printf("5 - Start/Stop Video stream into Video Framebuffer\n\r");
+	xil_printf("6 - Change Video Framebuffer Index\n\r");
+	xil_printf("7 - Grab Video Frame and invert colors\n\r");
+	xil_printf("8 - Grab Video Frame and scale to Display resolution\n\r");
+	xil_printf("9 - Detect Coloured Blocks\n\r");
+	xil_printf("q - Quit\n\r");
+	xil_printf("\n\r");
+	xil_printf("\n\r");
+	xil_printf("Enter a selection:");
+}
+
+void DemoChangeRes()
+{
+	int fResSet = 0;
+	int status;
+	char userInput = 0;
+
+	/* Flush UART FIFO */
+	while (!XUartLite_IsReceiveEmpty(UART_BASEADDR))
+		{
+			XUartLite_ReadReg(UART_BASEADDR, XUL_RX_FIFO_OFFSET);
+		}
+
+	while (!fResSet)
+	{
+		DemoCRMenu();
+
+
+
+
+		/* Wait for data on UART */
+		while (XUartLite_IsReceiveEmpty(UART_BASEADDR)) // && !fRefresh)
+		{}
+
+		/* Store the first character in the UART recieve FIFO and echo it */
+
+		userInput = XUartLite_ReadReg(UART_BASEADDR, XUL_RX_FIFO_OFFSET);
+		xil_printf("%c", userInput);
+		status = XST_SUCCESS;
+		switch (userInput)
+		{
+		case '1':
+			status = DisplayStop(&dispCtrl);
+			DisplaySetMode(&dispCtrl, &VMODE_640x480);
+			DisplayStart(&dispCtrl);
+			fResSet = 1;
+			break;
+		case '2':
+			status = DisplayStop(&dispCtrl);
+			DisplaySetMode(&dispCtrl, &VMODE_800x600);
+			DisplayStart(&dispCtrl);
+			fResSet = 1;
+			break;
+		case '3':
+			status = DisplayStop(&dispCtrl);
+			DisplaySetMode(&dispCtrl, &VMODE_1280x720);
+			DisplayStart(&dispCtrl);
+			fResSet = 1;
+			break;
+		case '4':
+			status = DisplayStop(&dispCtrl);
+			DisplaySetMode(&dispCtrl, &VMODE_1280x1024);
+			DisplayStart(&dispCtrl);
+			fResSet = 1;
+			break;
+		case '5':
+			status = DisplayStop(&dispCtrl);
+			DisplaySetMode(&dispCtrl, &VMODE_1920x1080);
+			DisplayStart(&dispCtrl);
+			fResSet = 1;
+			break;
+		case 'q':
+			fResSet = 1;
+			break;
+		default :
+			xil_printf("\n\rInvalid Selection");
+			MB_Sleep(50);
+		}
+		if (status == XST_DMA_ERROR)
+		{
+			xil_printf("\n\rWARNING: AXI VDMA Error detected and cleared\n\r");
+		}
+	}
+}
+
+void DemoCRMenu()
+{
+	xil_printf("\x1B[H"); //Set cursor to top left of terminal
+	xil_printf("\x1B[2J"); //Clear terminal
+	xil_printf("**************************************************\n\r");
+	xil_printf("*                ZYBO Video Demo                 *\n\r");
+	xil_printf("**************************************************\n\r");
+	xil_printf("*Current Resolution: %28s*\n\r", dispCtrl.vMode.label);
+	printf("*Pixel Clock Freq. (MHz): %23.3f*\n\r", dispCtrl.pxlFreq);
+	xil_printf("**************************************************\n\r");
+	xil_printf("\n\r");
+	xil_printf("1 - %s\n\r", VMODE_640x480.label);
+	xil_printf("2 - %s\n\r", VMODE_800x600.label);
+	xil_printf("3 - %s\n\r", VMODE_1280x720.label);
+	xil_printf("4 - %s\n\r", VMODE_1280x1024.label);
+	xil_printf("5 - %s\n\r", VMODE_1920x1080.label);
+	xil_printf("q - Quit (don't change resolution)\n\r");
+	xil_printf("\n\r");
+	xil_printf("Select a new resolution:");
+}
+
+void DemoInvertFrame(u8 *srcFrame, u8 *destFrame, u32 width, u32 height, u32 stride)
+{
+	u32 xcoi, ycoi;
+	u32 lineStart = 0;
+	for(ycoi = 0; ycoi < height; ycoi++)
+	{
+		for(xcoi = 0; xcoi < (width * 3); xcoi+=3)
+		{
+			destFrame[xcoi + lineStart] = ~srcFrame[xcoi + lineStart];         //Red
+			destFrame[xcoi + lineStart + 1] = ~srcFrame[xcoi + lineStart + 1]; //Blue
+			destFrame[xcoi + lineStart + 2] = ~srcFrame[xcoi + lineStart + 2]; //Green
+		}
+		lineStart += stride;
+	}
+	/*
+	 * Flush the framebuffer memory range to ensure changes are written to the
+	 * actual memory, and therefore accessible by the VDMA.
+	 */
+	Xil_DCacheFlushRange((unsigned int) destFrame, DEMO_MAX_FRAME);
+}
+
+
+/*
+ * Bilinear interpolation algorithm. Assumes both frames have the same stride.
+ */
+void DemoScaleFrame(u8 *srcFrame, u8 *destFrame, u32 srcWidth, u32 srcHeight, u32 destWidth, u32 destHeight, u32 stride)
+{
+	float xInc, yInc; // Width/height of a destination frame pixel in the source frame coordinate system
+	float xcoSrc, ycoSrc; // Location of the destination pixel being operated on in the source frame coordinate system
+	float x1y1, x2y1, x1y2, x2y2; //Used to store the color data of the four nearest source pixels to the destination pixel
+	int ix1y1, ix2y1, ix1y2, ix2y2; //indexes into the source frame for the four nearest source pixels to the destination pixel
+	float xDist, yDist; //distances between destination pixel and x1y1 source pixels in source frame coordinate system
+
+	int xcoDest, ycoDest; // Location of the destination pixel being operated on in the destination coordinate system
+	int iy1; //Used to store the index of the first source pixel in the line with y1
+	int iDest; //index of the pixel data in the destination frame being operated on
+
+	int i;
+
+	xInc = ((float) srcWidth - 1.0) / ((float) destWidth);
+	yInc = ((float) srcHeight - 1.0) / ((float) destHeight);
+
+	ycoSrc = 0.0;
+	for (ycoDest = 0; ycoDest < destHeight; ycoDest++)
+	{
+		iy1 = ((int) ycoSrc) * stride;
+		yDist = ycoSrc - ((float) ((int) ycoSrc));
+
+		/*
+		 * Save some cycles in the loop below by presetting the destination
+		 * index to the first pixel in the current line
+		 */
+		iDest = ycoDest * stride;
+
+		xcoSrc = 0.0;
+		for (xcoDest = 0; xcoDest < destWidth; xcoDest++)
+		{
+			ix1y1 = iy1 + ((int) xcoSrc) * 3;
+			ix2y1 = ix1y1 + 3;
+			ix1y2 = ix1y1 + stride;
+			ix2y2 = ix1y1 + stride + 3;
+
+			xDist = xcoSrc - ((float) ((int) xcoSrc));
+
+			/*
+			 * For loop handles all three colors
+			 */
+			for (i = 0; i < 3; i++)
+			{
+				x1y1 = (float) srcFrame[ix1y1 + i];
+				x2y1 = (float) srcFrame[ix2y1 + i];
+				x1y2 = (float) srcFrame[ix1y2 + i];
+				x2y2 = (float) srcFrame[ix2y2 + i];
+
+				/*
+				 * Bilinear interpolation function
+				 */
+				destFrame[iDest] = (u8) ((1.0-yDist)*((1.0-xDist)*x1y1+xDist*x2y1) + yDist*((1.0-xDist)*x1y2+xDist*x2y2));
+				iDest++;
+			}
+			xcoSrc += xInc;
+		}
+		ycoSrc += yInc;
+	}
+
+	/*
+	 * Flush the framebuffer memory range to ensure changes are written to the
+	 * actual memory, and therefore accessible by the VDMA.
+	 */
+	Xil_DCacheFlushRange((unsigned int) destFrame, DEMO_MAX_FRAME);
+
+	return;
+}
+
+void DemoPrintTest(u8 *frame, u32 width, u32 height, u32 stride, int pattern)
+{
+	u32 xcoi, ycoi;
+	u32 iPixelAddr;
+	u8 wRed, wBlue, wGreen;
+	u32 wCurrentInt;
+	double fRed, fBlue, fGreen, fColor;
+	u32 xLeft, xMid, xRight, xInt;
+	u32 yMid, yInt;
+	double xInc, yInc;
+
+
+	switch (pattern)
+	{
+	case DEMO_PATTERN_0:
+
+		xInt = width / 4; //Four intervals, each with width/4 pixels
+		xLeft = xInt * 3;
+		xMid = xInt * 2 * 3;
+		xRight = xInt * 3 * 3;
+		xInc = 256.0 / ((double) xInt); //256 color intensities are cycled through per interval (overflow must be caught when color=256.0)
+
+		yInt = height / 2; //Two intervals, each with width/2 lines
+		yMid = yInt;
+		yInc = 256.0 / ((double) yInt); //256 color intensities are cycled through per interval (overflow must be caught when color=256.0)
+
+		fBlue = 0.0;
+		fRed = 256.0;
+		for(xcoi = 0; xcoi < (width*3); xcoi+=3)
+		{
+			/*
+			 * Convert color intensities to integers < 256, and trim values >=256
+			 */
+			wRed = (fRed >= 256.0) ? 255 : ((u8) fRed);
+			wBlue = (fBlue >= 256.0) ? 255 : ((u8) fBlue);
+			iPixelAddr = xcoi;
+			fGreen = 0.0;
+			for(ycoi = 0; ycoi < height; ycoi++)
+			{
+
+				wGreen = (fGreen >= 256.0) ? 255 : ((u8) fGreen);
+				frame[iPixelAddr] = wRed;
+				frame[iPixelAddr + 1] = wBlue;
+				frame[iPixelAddr + 2] = wGreen;
+				if (ycoi < yMid)
+				{
+					fGreen += yInc;
+				}
+				else
+				{
+					fGreen -= yInc;
+				}
+
+				/*
+				 * This pattern is printed one vertical line at a time, so the address must be incremented
+				 * by the stride instead of just 1.
+				 */
+				iPixelAddr += stride;
+			}
+
+			if (xcoi < xLeft)
+			{
+				fBlue = 0.0;
+				fRed -= xInc;
+			}
+			else if (xcoi < xMid)
+			{
+				fBlue += xInc;
+				fRed += xInc;
+			}
+			else if (xcoi < xRight)
+			{
+				fBlue -= xInc;
+				fRed -= xInc;
+			}
+			else
+			{
+				fBlue += xInc;
+				fRed = 0;
+			}
+		}
+		/*
+		 * Flush the framebuffer memory range to ensure changes are written to the
+		 * actual memory, and therefore accessible by the VDMA.
+		 */
+		Xil_DCacheFlushRange((unsigned int) frame, DEMO_MAX_FRAME);
+		break;
+	case DEMO_PATTERN_1:
+
+		xInt = width / 7; //Seven intervals, each with width/7 pixels
+		xInc = 256.0 / ((double) xInt); //256 color intensities per interval. Notice that overflow is handled for this pattern.
+
+		fColor = 0.0;
+		wCurrentInt = 1;
+		for(xcoi = 0; xcoi < (width*3); xcoi+=3)
+		{
+
+			/*
+			 * Just draw white in the last partial interval (when width is not divisible by 7)
+			 */
+			if (wCurrentInt > 7)
+			{
+				wRed = 255;
+				wBlue = 255;
+				wGreen = 255;
+			}
+			else
+			{
+				if (wCurrentInt & 0b001)
+					wRed = (u8) fColor;
+				else
+					wRed = 0;
+
+				if (wCurrentInt & 0b010)
+					wBlue = (u8) fColor;
+				else
+					wBlue = 0;
+
+				if (wCurrentInt & 0b100)
+					wGreen = (u8) fColor;
+				else
+					wGreen = 0;
+			}
+
+			iPixelAddr = xcoi;
+
+			for(ycoi = 0; ycoi < height; ycoi++)
+			{
+				frame[iPixelAddr] = wRed;
+				frame[iPixelAddr + 1] = wBlue;
+				frame[iPixelAddr + 2] = wGreen;
+				/*
+				 * This pattern is printed one vertical line at a time, so the address must be incremented
+				 * by the stride instead of just 1.
+				 */
+				iPixelAddr += stride;
+			}
+
+			fColor += xInc;
+			if (fColor >= 256.0)
+			{
+				fColor = 0.0;
+				wCurrentInt++;
+			}
+		}
+		/*
+		 * Flush the framebuffer memory range to ensure changes are written to the
+		 * actual memory, and therefore accessible by the VDMA.
+		 */
+		Xil_DCacheFlushRange((unsigned int) frame, DEMO_MAX_FRAME);
+		break;
+	default :
+		xil_printf("Error: invalid pattern passed to DemoPrintTest");
+	}
+}
+
+void DemoISR(void *callBackRef, void *pVideo)
+{
+	char *data = (char *) callBackRef;
+	*data = 1; //set fRefresh to 1
+}

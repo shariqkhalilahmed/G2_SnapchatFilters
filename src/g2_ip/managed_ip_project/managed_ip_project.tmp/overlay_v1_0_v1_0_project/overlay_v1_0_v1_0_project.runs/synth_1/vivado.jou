@@ -1,0 +1,12 @@
+#-----------------------------------------------------------
+# Vivado v2016.2 (64-bit)
+# SW Build 1577090 on Thu Jun  2 16:32:40 MDT 2016
+# IP Build 1577682 on Fri Jun  3 12:00:54 MDT 2016
+# Start of session at: Fri Mar 31 06:40:11 2017
+# Process ID: 11508
+# Current directory: c:/ece532/hdmi_final/hdmi/ip/managed_ip_project/managed_ip_project.tmp/overlay_v1_0_v1_0_project/overlay_v1_0_v1_0_project.runs/synth_1
+# Command line: vivado.exe -log overlay_v1_0.vds -mode batch -messageDb vivado.pb -notrace -source overlay_v1_0.tcl
+# Log file: c:/ece532/hdmi_final/hdmi/ip/managed_ip_project/managed_ip_project.tmp/overlay_v1_0_v1_0_project/overlay_v1_0_v1_0_project.runs/synth_1/overlay_v1_0.vds
+# Journal file: c:/ece532/hdmi_final/hdmi/ip/managed_ip_project/managed_ip_project.tmp/overlay_v1_0_v1_0_project/overlay_v1_0_v1_0_project.runs/synth_1\vivado.jou
+#-----------------------------------------------------------
+source overlay_v1_0.tcl -notrace
