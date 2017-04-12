@@ -56,11 +56,12 @@ Respository Structure
 | Directory           | Description                                                |
 |-------------------- |------------------------------------------------------------|
 | `docs/`             | Documents pertaining to design and hurdles of project      |
-| `src/`              | All files related to project implementation                |
+| `src/`              | All files related to project implementation including .coe file for memory intialization |
 | `src/proj`          | Vivado project and associated files excluding IPs source but including SDK workspace (hdmi.sdk) |
+| `src/proj/hdmi.sdk` | Contains videodemo SDK project with code intended for microblaze processor   |
 | `src/g2_ip`         | Managed IP repository for custom IPs written by our team (G2) including block_detection, overlay etc. |
 | `src/repo/`         | Contains custom IPs from Digilient including RGBtoDVI etc. |
-| `src/proj/hdmi.sdk` | Contains videodemo SDK project with code intended for microblaze processor   |
+
 
 
 Authors
@@ -71,6 +72,6 @@ Shirley Yang
 
 Acknowledgements
 ----------------
-- The design is utilizes the Nexys Video HDMI Demo as a base which can be found here: https://reference.digilentinc.com/learn/programmable-logic/tutorials/nexys-video-hdmi-demo/start
+- The design utilizes the Nexys Video HDMI Demo as a base which can be found here: https://reference.digilentinc.com/learn/programmable-logic/tutorials/nexys-video-hdmi-demo/start
 - Since Nexys Video HDMI Demo uses Xilinx Microblaze and LogiCore IPs as well as Digilent's own RGBtoDVI and DVItoRGB IPs, our design by default makes use of these
-- The software developed for the microblaze processor is also based on the videodemo project in the Nexys Video HDMI Demo
+- The software developed for the microblaze processor is based on the videodemo project from the Nexys Video HDMI Demo as well
