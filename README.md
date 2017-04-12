@@ -3,15 +3,13 @@ FPGA Snapchat Filters
 
 About
 -----
-The aim of this project is to develop a turret based laser-pointer with two
-degrees of freedom, that can identify specific objects, target and then "fire"
-at them.  This project incorporates a variety of subsystems including: audio,
-video, SD card, external memory, and electromechanical components.
+The goal of this project is to develop a real-time video input-output system which implments basic filters comprising of overlay drawings, face replacement and face swapping akin to filters on the popular mobile application 'Snapchat'. The project employs the use of a Nexys Video Board with an FPGA to fulfill its real-time requirement and is controlled using an Android App (https://github.com/shariqkhalilahmed/FPGASnapChatBluetooth) connected wirelessly over bluetooth. Faces are identified in the video frame using glasses with uniquely coloured tips which can be detected in real-time by the system.
 
 Usage
 -----
 
-*Note: while the hardware functions correctly, integration and control on the software side (for microblaze) is incomplete but individual IP code should work from the C source code provided*
+*Note: While the hardware functions correctly, integration and control on the software side (for microblaze) is incomplete but individual IP code as well as bluetooth interface should work from the C source code provided*
+
 To use this project, follow these steps:  
 
 1. Clone/Download the respository
